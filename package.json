@@ -1,0 +1,63 @@
+{
+  "name": "sshctl",
+  "version": "1.0.0",
+  "description": "Cross-platform SSH remote execution, passwordless key management, Windows Session 0 desktop launcher, SFTP transfers & MCP server",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "bin": {
+    "sshctl": "bin/sshctl.js"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "README.md",
+    "LICENSE",
+    "docs/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "start": "node dist/index.js",
+    "cli": "node bin/sshctl.js",
+    "export:schemas": "node scripts/export-schemas.js",
+    "test": "tsc -p tsconfig.test.json && node --test \".test-build/**/*.test.js\"",
+    "prepare": "tsc",
+    "test:e2e": "node test/e2e-linux.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ssh2": "^1.15.0",
+    "zod": "^3.23.8",
+    "zod-to-json-schema": "^3.25.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.1",
+    "@types/ssh2": "^1.15.4",
+    "typescript": "^5.7.3"
+  },
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "ssh",
+    "sftp",
+    "powershell",
+    "session-0",
+    "automation",
+    "ai-agent",
+    "devops"
+  ],
+  "author": "Nguyen Van Huy <nguyenvanhuy0612@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nguyenvanhuy0612/sshctl.git"
+  },
+  "homepage": "https://github.com/nguyenvanhuy0612/sshctl#readme",
+  "bugs": {
+    "url": "https://github.com/nguyenvanhuy0612/sshctl/issues"
+  },
+  "license": "MIT"
+}
