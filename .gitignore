@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.test-build/
+*.log
+.DS_Store
+Thumbs.db
+
+# The repo root .gitignore has a generic [Bb]in/ rule aimed at build output. This project's
+# bin/ holds the committed CLI entry point declared in package.json, so re-include it.
+!bin/
+!bin/*.js
