@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import * as fs from 'fs';
 import * as path from 'path';
-import { helperFor, targetLabel, targetSchema, textResult } from './common.js';
+import { diagnoseSshError, helperFor, targetLabel, targetSchema, textResult } from './common.js';
 import { expandHome } from '../../core/profiles.js';
 
 /** SFTP wants forward slashes even on Windows targets; C:\a\b has to become C:/a/b. */
@@ -84,7 +84,7 @@ export async function handleSshUpload(args: z.infer<z.ZodObject<typeof sshUpload
       ].join('\n')
     );
   } catch (err: any) {
-    return textResult(`Upload failed: ${err.message || String(err)}`, true);
+    return textResult(`Upload failed: ${diagnoseSshError(err, target)}`, true);
   }
 }
 
@@ -125,6 +125,6 @@ export async function handleSshDownload(args: z.infer<z.ZodObject<typeof sshDown
       ].join('\n')
     );
   } catch (err: any) {
-    return textResult(`Download failed: ${err.message || String(err)}`, true);
+    return textResult(`Download failed: ${diagnoseSshError(err, target)}`, true);
   }
 }

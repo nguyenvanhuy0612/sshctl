@@ -46,8 +46,9 @@ export interface TargetArgs {
 }
 
 export function profilesPath(): string {
-  if (process.env.SSHCTL_PROFILES) {
-    return expandHome(process.env.SSHCTL_PROFILES);
+  const envPath = process.env.SSHCTL_PROFILES || process.env.MCP_SSH_PROFILES;
+  if (envPath) {
+    return expandHome(envPath);
   }
   return path.join(os.homedir(), '.sshctl', 'profiles.json');
 }
@@ -114,9 +115,11 @@ function warnIfWorldReadable(file: string): void {
 /**
  * Merge a named profile with explicit arguments. Explicit arguments win, so a profile can
  * supply the host and key while a single call overrides the username.
+ * Automatically matches an existing profile if host is given without a profile name.
  */
 export function resolveTarget(args: TargetArgs): ResolvedTarget {
   let base: Profile | undefined;
+  let matchedProfileName = args.profile;
 
   if (args.profile) {
     const profiles = loadProfiles();
@@ -129,9 +132,18 @@ export function resolveTarget(args: TargetArgs): ResolvedTarget {
           : `Unknown profile "${args.profile}". No profiles are defined in ${profilesPath()}.`
       );
     }
+  } else if (args.host) {
+    const profiles = loadProfiles();
+    const exactMatch = Object.entries(profiles).find(
+      ([_, p]) => p.host === args.host && (!args.username || p.username === args.username)
+    );
+    if (exactMatch) {
+      matchedProfileName = exactMatch[0];
+      base = exactMatch[1];
+    }
   }
 
-  const label = args.profile ?? '<inline>';
+  const label = matchedProfileName ?? '<inline>';
   const host = args.host ?? base?.host;
   const username = args.username ?? base?.username;
 
@@ -143,17 +155,71 @@ export function resolveTarget(args: TargetArgs): ResolvedTarget {
   }
 
   const privateKeyPath = args.privateKeyPath ?? base?.privateKeyPath;
+  const resolvedKeyPath = privateKeyPath ? expandHome(privateKeyPath) : undefined;
+
+  // Auto-heal file permissions on Unix if private key is accessible
+  if (resolvedKeyPath && process.platform !== 'win32' && fs.existsSync(resolvedKeyPath)) {
+    try {
+      const stat = fs.statSync(resolvedKeyPath);
+      if ((stat.mode & 0o077) !== 0) {
+        fs.chmodSync(resolvedKeyPath, 0o600);
+      }
+    } catch {
+      // Permission fix is best-effort
+    }
+  }
 
   return {
     host,
     username,
     port: args.port ?? base?.port ?? 22,
     password: derefSecret(args.password ?? base?.password, label),
-    privateKeyPath: privateKeyPath ? expandHome(privateKeyPath) : undefined,
+    privateKeyPath: resolvedKeyPath,
     passphrase: derefSecret(args.passphrase ?? base?.passphrase, label),
     targetOs: args.targetOs ?? base?.targetOs ?? 'auto',
-    profileName: args.profile,
+    profileName: matchedProfileName,
   };
+}
+
+/**
+ * Persist or update a profile in profiles.json with mode 0600.
+ */
+export function upsertProfile(name: string, profile: Profile): void {
+  const file = profilesPath();
+  const dir = path.dirname(file);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  }
+  let current: Record<string, Profile> = {};
+  if (fs.existsSync(file)) {
+    try {
+      current = loadProfiles();
+    } catch {
+      current = {};
+    }
+  }
+  current[name] = profile;
+  fs.writeFileSync(file, JSON.stringify(current, null, 2), { mode: 0o600 });
+}
+
+/**
+ * Generate a concise profile name matching standard conventions (e.g. win46, host46).
+ */
+export function suggestProfileName(host: string, username: string, targetOs?: string): string {
+  const lastOctet = host.split('.').pop()?.replace(/[^a-zA-Z0-9]/g, '') || host.replace(/[^a-zA-Z0-9]/g, '-');
+  const prefix = targetOs === 'windows' ? 'win' : targetOs === 'mac' ? 'mac' : 'host';
+  const candidate = `${prefix}${lastOctet}`;
+
+  let current: Record<string, Profile> = {};
+  try {
+    current = loadProfiles();
+  } catch {
+    current = {};
+  }
+  if (current[candidate] && current[candidate].host !== host) {
+    return `${prefix}-${host.replace(/\./g, '-')}`;
+  }
+  return candidate;
 }
 
 /** Profile summaries for the agent, with every secret field reduced to a boolean. */

@@ -1,6 +1,17 @@
 import { z } from 'zod';
-import { execSchema, helperFor, targetLabel, targetOsSchema, targetSchema, textResult } from './common.js';
+import {
+  diagnoseSshError,
+  execSchema,
+  helperFor,
+  targetLabel,
+  targetOsSchema,
+  targetSchema,
+  textResult,
+} from './common.js';
+import { ExecResult } from '../../core/ssh-client.js';
 import { formatOutputText } from '../../core/ps.js';
+import { clearKnownHost } from './ssh-connect.js';
+import { autoSetupAndSaveProfile } from './ssh-passwordless.js';
 
 export const sshExecSchema = {
   ...targetSchema,
@@ -20,19 +31,71 @@ export const sshExecSchema = {
 
 export async function handleSshExec(args: z.infer<z.ZodObject<typeof sshExecSchema>>) {
   let label = args.profile ?? args.host ?? 'target';
+  let autoNotice = '';
 
   try {
-    const { helper, target } = helperFor(args);
+    let { helper, target } = helperFor(args);
     label = targetLabel(target);
 
+    // Auto-provision if password is provided and target does not yet have a verified private key profile
+    if (target.password && (!target.profileName || !target.privateKeyPath)) {
+      try {
+        const deployRes = await autoSetupAndSaveProfile(target, args.targetOs);
+        if (deployRes) {
+          autoNotice = `Automatically configured passwordless key and saved profile "${deployRes.profileName}"`;
+          const reResolved = helperFor({ profile: deployRes.profileName, ...args });
+          helper = reResolved.helper;
+          target = reResolved.target;
+          label = targetLabel(target);
+        }
+      } catch {
+        // Fall back to direct execution with password if auto-provision fails
+      }
+    }
+
     const startMs = Date.now();
-    const result = await helper.execSmart(args.command, {
-      targetOs: args.targetOs ?? target.targetOs,
-      desktop: args.desktop,
-      timeoutMs: args.timeoutMs,
-      maxOutputBytes: args.maxOutputBytes,
-      stdin: args.stdin,
-    });
+    let result: ExecResult;
+
+    const runExec = () =>
+      helper.execSmart(args.command, {
+        targetOs: args.targetOs ?? target.targetOs,
+        desktop: args.desktop,
+        timeoutMs: args.timeoutMs,
+        maxOutputBytes: args.maxOutputBytes,
+        stdin: args.stdin,
+      });
+
+    try {
+      result = await runExec();
+    } catch (execErr: any) {
+      const errMsg = execErr?.message || String(execErr);
+
+      // Auto-heal: Host key mismatch after snapshot revert or reimage
+      if (/REMOTE HOST IDENTIFICATION HAS CHANGED|Host key verification failed/i.test(errMsg)) {
+        clearKnownHost(target.host, target.port);
+        result = await runExec();
+      }
+      // Auto-heal: Key wiped after snapshot revert, but password is available to redeploy
+      else if (
+        target.password &&
+        /All configured authentication methods failed|Permission denied/i.test(errMsg)
+      ) {
+        const deployRes = await autoSetupAndSaveProfile(target, args.targetOs);
+        if (deployRes) {
+          autoNotice = `Re-deployed passwordless key after snapshot revert and updated profile "${deployRes.profileName}"`;
+          const reResolved = helperFor({ profile: deployRes.profileName, ...args });
+          helper = reResolved.helper;
+          target = reResolved.target;
+          label = targetLabel(target);
+          result = await runExec();
+        } else {
+          throw execErr;
+        }
+      } else {
+        throw execErr;
+      }
+    }
+
     const durationMs = Date.now() - startMs;
 
     const formattedStdout = formatOutputText(result.stdout, {
@@ -61,6 +124,9 @@ export async function handleSshExec(args: z.infer<z.ZodObject<typeof sshExecSche
     }
 
     const outputBlocks: string[] = [header.join(' | ')];
+    if (autoNotice) {
+      outputBlocks.push(`NOTE: ${autoNotice}`);
+    }
 
     if (formattedStdout.text) {
       outputBlocks.push('', '--- STDOUT ---', formattedStdout.text);
@@ -82,6 +148,12 @@ export async function handleSshExec(args: z.infer<z.ZodObject<typeof sshExecSche
       ...(result.timedOut ? { isError: true } : {}),
     };
   } catch (err: any) {
-    return textResult(`SSH execution failed on ${label}: ${err.message || String(err)}`, true);
+    let resolvedTarget: ReturnType<typeof helperFor>['target'];
+    try {
+      resolvedTarget = helperFor(args).target;
+    } catch {
+      return textResult(`SSH execution failed on ${label}: ${err.message || String(err)}`, true);
+    }
+    return textResult(diagnoseSshError(err, resolvedTarget), true);
   }
 }

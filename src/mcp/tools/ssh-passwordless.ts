@@ -14,7 +14,7 @@ import {
   buildWindowsRemoveScript,
 } from '../../core/key-scripts.js';
 import { execSchema, helperFor, targetLabel, targetOsSchema, targetSchema, textResult } from './common.js';
-import { expandHome } from '../../core/profiles.js';
+import { expandHome, profilesPath, suggestProfileName, upsertProfile } from '../../core/profiles.js';
 
 export const sshPasswordlessSchema = {
   ...targetSchema,
@@ -23,71 +23,71 @@ export const sshPasswordlessSchema = {
   keyPath: z.string().optional().describe('Local private key path (defaults to ~/.ssh/id_ed25519).'),
 };
 
-export async function handleSshSetupPasswordless(
-  args: z.infer<z.ZodObject<typeof sshPasswordlessSchema>>
-) {
+/**
+ * Core deploy and verification routine for passwordless SSH authentication.
+ */
+export async function setupPasswordlessDeploy(
+  target: ReturnType<typeof helperFor>['target'],
+  targetOsOption?: 'auto' | 'windows' | 'linux' | 'mac',
+  keyPath?: string,
+  execOptions: { timeoutMs?: number; maxOutputBytes?: number } = {}
+): Promise<{
+  deployedTo: string;
+  privateKeyPath: string;
+  targetOs?: string;
+}> {
   const localSshDir = path.join(os.homedir(), '.ssh');
   if (!fs.existsSync(localSshDir)) {
     fs.mkdirSync(localSshDir, { recursive: true, mode: 0o700 });
   }
 
-  const privateKeyPath = args.keyPath
-    ? expandHome(args.keyPath)
-    : path.join(localSshDir, 'id_ed25519');
+  const privateKeyPath = keyPath ? expandHome(keyPath) : path.join(localSshDir, 'id_ed25519');
   const publicKeyPath = `${privateKeyPath}.pub`;
 
-  // 1. Generate an ed25519 key pair locally if one is not already there.
   if (!fs.existsSync(privateKeyPath) || !fs.existsSync(publicKeyPath)) {
     try {
       execFileSync('ssh-keygen', ['-t', 'ed25519', '-f', privateKeyPath, '-N', '', '-q'], {
         stdio: 'pipe',
       });
     } catch (err: any) {
-      return textResult(
-        `Failed to generate local SSH key at ${privateKeyPath}: ${err.stderr?.toString() || err.message}`,
-        true
+      throw new Error(
+        `Failed to generate local SSH key at ${privateKeyPath}: ${err.stderr?.toString() || err.message}`
       );
     }
   }
 
   const publicKeyContent = fs.readFileSync(publicKeyPath, 'utf8').trim();
-  // The key is interpolated into a remote script. psSingleQuote/shSingleQuote handle quoting,
-  // and this rejects anything that is not shaped like a key at all.
   assertSafePublicKey(publicKeyContent);
 
-  const { helper, target } = helperFor(args);
-  const label = targetLabel(target);
-  const execOptions = { timeoutMs: args.timeoutMs, maxOutputBytes: args.maxOutputBytes };
+  const helper = new SSHHelper({
+    host: target.host,
+    port: target.port,
+    username: target.username,
+    password: target.password,
+    privateKeyPath: target.privateKeyPath,
+    passphrase: target.passphrase,
+  });
 
-  let deployedTo: string;
-  try {
-    deployedTo = await helper.withClient(async (conn) => {
-      const targetOs =
-        !args.targetOs || args.targetOs === 'auto' ? await helper.detectOs(conn) : args.targetOs;
+  const deployedTo = await helper.withClient(async (conn) => {
+    const targetOs =
+      !targetOsOption || targetOsOption === 'auto' ? await helper.detectOs(conn) : targetOsOption;
 
-      const command =
-        targetOs === 'windows'
-          ? buildPowerShellCommand(buildWindowsDeployScript(publicKeyContent))
-          : buildUnixDeployScript(publicKeyContent);
+    const command =
+      targetOs === 'windows'
+        ? buildPowerShellCommand(buildWindowsDeployScript(publicKeyContent))
+        : buildUnixDeployScript(publicKeyContent);
 
-      const res = await helper.execRaw(conn.client, command, execOptions);
+    const res = await helper.execRaw(conn.client, command, execOptions);
 
-      // The marker is the only reliable success signal. The old code checked the exit code
-      // first, which stayed 0 even when the ACL step had been commented out by string mangling.
-      if (!res.stdout.includes(DEPLOY_MARKER)) {
-        throw new Error(
-          `Key deployment did not report success on ${targetOs}.\nExit code: ${res.code}\nSTDOUT:\n${res.stdout || '(empty)'}\nSTDERR:\n${res.stderr || '(empty)'}`
-        );
-      }
+    if (!res.stdout.includes(DEPLOY_MARKER)) {
+      throw new Error(
+        `Key deployment did not report success on ${targetOs}.\nExit code: ${res.code}\nSTDOUT:\n${res.stdout || '(empty)'}\nSTDERR:\n${res.stderr || '(empty)'}`
+      );
+    }
 
-      return res.stdout.split(DEPLOY_MARKER)[1]?.trim() || '(unknown path)';
-    });
-  } catch (err: any) {
-    return textResult(`Key deployment failed for ${label}.\n${err.message || String(err)}`, true);
-  }
+    return res.stdout.split(DEPLOY_MARKER)[1]?.trim() || '(unknown path)';
+  });
 
-  // 2. Verify that this specific key can log in on its own.
-  //    ssh-agent is disabled for the check so an unrelated agent key cannot make it pass.
   const keyHelper = new SSHHelper({
     host: target.host,
     port: target.port,
@@ -101,37 +101,81 @@ export async function handleSshSetupPasswordless(
   try {
     verification = await keyHelper.testConnection();
   } catch (err: any) {
-    return textResult(
-      `Key was deployed to ${deployedTo} on ${label}, but the verification connection threw: ${err.message || String(err)}`,
-      true
+    throw new Error(
+      `Key was deployed to ${deployedTo}, but verification threw: ${err.message || String(err)}`
     );
   }
 
   if (!verification.connected) {
-    return textResult(
-      [
-        `Key was deployed to ${deployedTo} on ${label}, but key-only login failed.`,
-        `Error: ${verification.error}`,
-        '',
-        'Things worth checking on the target:',
-        '- sshd_config has PubkeyAuthentication yes and no AllowUsers rule excluding this account.',
-        '- On Windows, the Match Group administrators block in sshd_config points at the same file the key was written to.',
-        '- The private key used locally matches the deployed public key.',
-      ].join('\n'),
-      true
+    throw new Error(
+      `Key was deployed to ${deployedTo}, but key-only login failed: ${verification.error}`
     );
   }
 
-  return textResult(
-    [
-      `Passwordless SSH is configured and verified for ${label}.`,
-      `Target OS: ${verification.targetOs}`,
-      `Remote file: ${deployedTo}`,
-      `Local private key: ${privateKeyPath}`,
-      '',
-      'Next: save this target as a profile so future calls do not need a password argument. See ssh_list_profiles.',
-    ].join('\n')
-  );
+  return {
+    deployedTo,
+    privateKeyPath,
+    targetOs: verification.targetOs,
+  };
+}
+
+/**
+ * Deploy key and automatically persist profile in ~/.sshctl/profiles.json.
+ */
+export async function autoSetupAndSaveProfile(
+  target: ReturnType<typeof helperFor>['target'],
+  targetOsOption?: 'auto' | 'windows' | 'linux' | 'mac'
+): Promise<{ profileName: string; privateKeyPath: string } | null> {
+  if (!target.password) return null;
+  const deployRes = await setupPasswordlessDeploy(target, targetOsOption);
+  const profileName =
+    target.profileName || suggestProfileName(target.host, target.username, deployRes.targetOs);
+
+  upsertProfile(profileName, {
+    host: target.host,
+    port: target.port,
+    username: target.username,
+    targetOs: (deployRes.targetOs as any) ?? 'auto',
+    privateKeyPath: deployRes.privateKeyPath,
+    description: `Auto-configured profile for ${target.username}@${target.host}`,
+  });
+
+  return { profileName, privateKeyPath: deployRes.privateKeyPath };
+}
+
+export async function handleSshSetupPasswordless(
+  args: z.infer<z.ZodObject<typeof sshPasswordlessSchema>>
+) {
+  try {
+    const { target } = helperFor(args);
+    const label = targetLabel(target);
+    const execOptions = { timeoutMs: args.timeoutMs, maxOutputBytes: args.maxOutputBytes };
+
+    const deployRes = await setupPasswordlessDeploy(target, args.targetOs, args.keyPath, execOptions);
+    const profileName =
+      args.profile ?? target.profileName ?? suggestProfileName(target.host, target.username, deployRes.targetOs);
+
+    upsertProfile(profileName, {
+      host: target.host,
+      port: target.port,
+      username: target.username,
+      targetOs: (deployRes.targetOs as any) ?? 'auto',
+      privateKeyPath: deployRes.privateKeyPath,
+      description: `Passwordless profile for ${target.username}@${target.host}`,
+    });
+
+    return textResult(
+      [
+        `Passwordless SSH is configured and verified for ${label}.`,
+        `Target OS: ${deployRes.targetOs}`,
+        `Remote file: ${deployRes.deployedTo}`,
+        `Local private key: ${deployRes.privateKeyPath}`,
+        `Saved profile "${profileName}" to ${profilesPath()}.`,
+      ].join('\n')
+    );
+  } catch (err: any) {
+    return textResult(`Key deployment failed: ${err.message || String(err)}`, true);
+  }
 }
 
 export const sshRemovePasswordlessSchema = {

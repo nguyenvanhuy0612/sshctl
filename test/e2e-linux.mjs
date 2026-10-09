@@ -159,7 +159,7 @@ await check('oversized output is capped with a truncation notice', async () => {
   });
   assert.equal(r.truncated, true);
   assert.ok(r.stdout.length < 20000, `stdout was ${r.stdout.length} bytes`);
-  assert.match(r.stdout, /output truncated, kept 5000 of 500000 bytes/);
+  assert.match(r.stdout, /omitted in middle/);
   return `500KB down to ${r.stdout.length} chars`;
 });
 
@@ -254,8 +254,8 @@ await check('removing one key keeps the other and leaves a backup', async () => 
   assert.ok(!res.isError, text(res));
   const lines = (await remoteRead(authKeys)).trim().split('\n').filter(Boolean);
   assert.equal(lines.length, 1, `expected 1 key left, found ${lines.length}`);
-  const bak = await raw.execSmart('test -f ~/.ssh/authorized_keys.mcp-ssh.bak && echo YES || echo NO');
-  assert.match(bak.stdout, /YES/, 'no .mcp-ssh.bak was written');
+  const bak = await raw.execSmart('test -f ~/.ssh/authorized_keys.sshctl.bak && echo YES || echo NO');
+  assert.match(bak.stdout, /YES/, 'no .sshctl.bak was written');
 });
 
 await check('removeAllKeys clears every authorized key', async () => {

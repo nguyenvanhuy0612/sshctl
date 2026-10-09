@@ -3,7 +3,15 @@ import assert from 'node:assert/strict';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { derefSecret, describeProfiles, expandHome, resolveTarget } from './profiles.js';
+import {
+  derefSecret,
+  describeProfiles,
+  expandHome,
+  resolveTarget,
+  suggestProfileName,
+  upsertProfile,
+} from './profiles.js';
+import { diagnoseSshError } from '../mcp/tools/common.js';
 
 let tmpDir: string;
 let profileFile: string;
@@ -123,3 +131,66 @@ test('a profiles file containing an array is rejected', () => {
   writeProfiles([{ host: 'h' }]);
   assert.throws(() => resolveTarget({ profile: 'box' }), /must contain a JSON object/);
 });
+
+test('resolveTarget auto-matches profile by host when profile name is not given', () => {
+  writeProfiles({
+    win46: { host: '192.168.1.46', username: 'admin', targetOs: 'windows', privateKeyPath: '~/.ssh/id_ed25519' },
+  });
+  const target = resolveTarget({ host: '192.168.1.46' });
+  assert.equal(target.profileName, 'win46');
+  assert.equal(target.username, 'admin');
+  assert.equal(target.targetOs, 'windows');
+  assert.equal(target.privateKeyPath, path.join(os.homedir(), '.ssh/id_ed25519'));
+});
+
+test('resolveTarget auto-matches profile by host and matching username', () => {
+  writeProfiles({
+    box1: { host: '10.0.0.1', username: 'user1' },
+    box2: { host: '10.0.0.1', username: 'user2' },
+  });
+  const target = resolveTarget({ host: '10.0.0.1', username: 'user2' });
+  assert.equal(target.profileName, 'box2');
+  assert.equal(target.username, 'user2');
+});
+
+test('upsertProfile creates or updates profile with mode 0600', () => {
+  writeProfiles({ existing: { host: '1.2.3.4', username: 'root' } });
+  upsertProfile('newbox', { host: '5.6.7.8', username: 'admin', targetOs: 'linux' });
+  const target = resolveTarget({ profile: 'newbox' });
+  assert.equal(target.host, '5.6.7.8');
+  assert.equal(target.username, 'admin');
+
+  // Verify existing was preserved
+  const existing = resolveTarget({ profile: 'existing' });
+  assert.equal(existing.host, '1.2.3.4');
+
+  if (process.platform !== 'win32') {
+    const mode = fs.statSync(profileFile).mode & 0o777;
+    assert.equal(mode, 0o600);
+  }
+});
+
+test('suggestProfileName generates convention names based on targetOs and host', () => {
+  assert.equal(suggestProfileName('192.168.1.46', 'admin', 'windows'), 'win46');
+  assert.equal(suggestProfileName('10.0.0.12', 'qa', 'linux'), 'host12');
+  assert.equal(suggestProfileName('10.0.0.99', 'macuser', 'mac'), 'mac99');
+});
+
+test('diagnoseSshError provides actionable guidance for connection refused and timeouts', () => {
+  const target = resolveTarget({ host: '1.2.3.4', username: 'admin', targetOs: 'windows' });
+  const refused = diagnoseSshError(new Error('connect ECONNREFUSED 1.2.3.4:22'), target);
+  assert.ok(refused.includes('Connection refused'));
+  assert.ok(refused.includes('ssh_generate_rdp_bootstrap'));
+
+  const timeout = diagnoseSshError(new Error('connect ETIMEDOUT'), target);
+  assert.ok(timeout.includes('Connection timed out or network unreachable'));
+
+  const rootTarget = resolveTarget({ host: '1.2.3.4', username: 'root' });
+  const rootErr = diagnoseSshError(new Error('All configured authentication methods failed'), rootTarget);
+  assert.ok(rootErr.includes('disables root login'));
+
+  const keyTarget = resolveTarget({ host: '1.2.3.4', username: 'admin', privateKeyPath: '~/.ssh/id_ed25519' });
+  const keyWiped = diagnoseSshError(new Error('Permission denied (publickey)'), keyTarget);
+  assert.ok(keyWiped.includes('reverted from a snapshot'));
+});
+

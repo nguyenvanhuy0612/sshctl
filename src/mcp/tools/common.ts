@@ -87,3 +87,42 @@ export function targetLabel(target: ResolvedTarget): string {
 export function textResult(text: string, isError = false) {
   return { content: [{ type: 'text' as const, text }], ...(isError ? { isError: true } : {}) };
 }
+
+/**
+ * Classify SSH errors into actionable diagnostic guidance.
+ * Only reports to the user when self-healing/auto-provisioning is blocked.
+ */
+export function diagnoseSshError(err: any, target: ResolvedTarget): string {
+  const msg = err?.message || String(err);
+  const label = targetLabel(target);
+
+  if (/ECONNREFUSED/i.test(msg)) {
+    const hint =
+      target.targetOs === 'windows'
+        ? ' If OpenSSH is not installed on Windows, use ssh_generate_rdp_bootstrap to get an install one-liner.'
+        : ' Ensure OpenSSH server is installed and running.';
+    return `Connection refused on ${label} (port ${target.port} is closed).${hint}`;
+  }
+  if (/ETIMEDOUT|timed out|ENETUNREACH|EHOSTUNREACH/i.test(msg)) {
+    return `Connection timed out or network unreachable on ${label}. Check IP address and firewall rules.`;
+  }
+  if (/ENOTFOUND/i.test(msg)) {
+    return `Hostname "${target.host}" could not be resolved (DNS lookup failed).`;
+  }
+  if (/All configured authentication methods failed|Permission denied/i.test(msg)) {
+    if (target.username === 'root') {
+      return `Authentication failed for root on ${label}. Remote SSH server likely disables root login (PermitRootLogin no). Please connect with a regular user.`;
+    }
+    if (!target.password && !target.privateKeyPath) {
+      return `Authentication failed on ${label}. No password or private key was provided and default keys were rejected. Please provide credentials to establish a profile.`;
+    }
+    if (!target.password) {
+      return `Authentication failed on ${label} using SSH key. If the server was reverted from a snapshot, authorized_keys may have been wiped. Please provide the password so sshctl can redeploy the key and update the profile.`;
+    }
+    return `Authentication failed on ${label}. Server rejected credentials. Check username/password or if PasswordAuthentication is disabled on the server.`;
+  }
+  if (/UNPROTECTED PRIVATE KEY FILE|bad permissions/i.test(msg)) {
+    return `SSH private key permissions on ${label} are insecure. Mode must be 0600.`;
+  }
+  return `SSH execution failed on ${label}: ${msg}`;
+}

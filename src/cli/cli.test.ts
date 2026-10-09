@@ -41,7 +41,7 @@ test('sshctl --help prints usage information', async () => {
 test('sshctl --version prints version', async () => {
   const result = await runCliSubprocess(['--version']);
   assert.equal(result.code, 0);
-  assert.ok(result.stdout.includes('sshctl v0.0.1'));
+  assert.match(result.stdout, /sshctl v\d+\.\d+\.\d+/);
 });
 
 test('sshctl bootstrap-rdp outputs valid powershell script', async () => {

@@ -56,25 +56,16 @@ export const sshClearKnownHostsSchema = {
 };
 
 /**
- * Remove a host from known_hosts.
- *
- * Delegates to `ssh-keygen -R`, which is the only correct way to do this: entries are commonly
- * hashed (HashKnownHosts is on by default on macOS and many distributions), so a plain text
- * search finds nothing and reports success anyway. ssh-keygen also handles the [host]:port form
- * and writes a known_hosts.old backup. The manual fallback exists for hosts with no ssh-keygen
- * on PATH and matches host tokens exactly rather than by substring, so removing 10.0.0.1 no
- * longer takes 10.0.0.10 with it.
+ * Remove a host from known_hosts. Can be called programmatically for auto-healing.
  */
-export async function handleSshClearKnownHosts(
-  args: z.infer<z.ZodObject<typeof sshClearKnownHostsSchema>>
-) {
+export function clearKnownHost(host: string, port?: number): { success: boolean; message: string } {
   const knownHostsPath = path.join(os.homedir(), '.ssh', 'known_hosts');
   if (!fs.existsSync(knownHostsPath)) {
-    return textResult(`No known_hosts file at ${knownHostsPath}; nothing to clear.`);
+    return { success: true, message: `No known_hosts file at ${knownHostsPath}; nothing to clear.` };
   }
 
-  const targets = [args.host];
-  if (args.port && args.port !== 22) targets.push(`[${args.host}]:${args.port}`);
+  const targets = [host];
+  if (port && port !== 22) targets.push(`[${host}]:${port}`);
 
   try {
     const output = targets
@@ -87,27 +78,39 @@ export async function handleSshClearKnownHosts(
       .join('')
       .trim();
 
-    return textResult(
-      [
+    return {
+      success: true,
+      message: [
         `Cleared ${targets.join(' and ')} from ${knownHostsPath} using ssh-keygen -R.`,
         `A backup was written to ${knownHostsPath}.old.`,
         output ? `\nssh-keygen output:\n${output}` : '',
       ]
         .filter(Boolean)
-        .join('\n')
-    );
+        .join('\n'),
+    };
   } catch (err: any) {
     const stderr = (err.stderr || '').toString().trim();
 
     // ssh-keygen exits non-zero when the host simply is not present. That is not a failure.
     if (/not found in/i.test(stderr)) {
-      return textResult(`${args.host} was not present in ${knownHostsPath}; nothing to remove.`);
+      return { success: true, message: `${host} was not present in ${knownHostsPath}; nothing to remove.` };
     }
     if (err.code !== 'ENOENT') {
-      return textResult(`ssh-keygen -R failed: ${stderr || err.message}`, true);
+      return { success: false, message: `ssh-keygen -R failed: ${stderr || err.message}` };
     }
-    return manualClear(knownHostsPath, targets);
+    const manualRes = manualClear(knownHostsPath, targets);
+    return { success: true, message: manualRes.content[0].text };
   }
+}
+
+/**
+ * Remove a host from known_hosts tool handler.
+ */
+export async function handleSshClearKnownHosts(
+  args: z.infer<z.ZodObject<typeof sshClearKnownHostsSchema>>
+) {
+  const res = clearKnownHost(args.host, args.port);
+  return textResult(res.message, !res.success);
 }
 
 /** Exact-token fallback for systems without ssh-keygen. Cannot match hashed entries. */

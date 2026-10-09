@@ -1,6 +1,6 @@
 {
   "name": "sshctl-mcp",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Cross-platform SSH remote execution, passwordless key management, Windows Session 0 desktop launcher, SFTP transfers & MCP server",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -27,7 +27,9 @@
     "export:schemas": "node scripts/export-schemas.js",
     "test": "tsc && tsc -p tsconfig.test.json && node --test \".test-build/**/*.test.js\"",
     "prepare": "tsc",
-    "test:e2e": "node test/e2e-linux.mjs"
+    "test:e2e": "node test/e2e-linux.mjs",
+    "test:container": "tsc && node test/e2e-container.mjs",
+    "test:all": "npm test && npm run test:container"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
